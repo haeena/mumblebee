@@ -368,15 +368,15 @@ class mumbleConnection(threading.Thread):
         if msgType==11:
             message=self.parseMessage(msgType,stringMessage)
             if message.actor!=self.session:
-                # message.message = string
-                pbMess =  Mumble_pb2.TextMessage()
-                pbMess.actor = self.session
-                pbMess.channel_id.append(self.channelId)
-                pbMess.message = "asdf" # TODO: Koko VOD URL ni suru
-                pbMess.session.append(self.session)
-                if not self.sendTotally(self.packageMessageForSending(messageLookupMessage[type(pbMess)],pbMess.SerializeToString())):
-                    self.wrapUpThread(True)
-                return
+                if message.message.startswith("/vod"):
+                    pbMess =  Mumble_pb2.TextMessage()
+                    pbMess.actor = self.session
+                    pbMess.channel_id.append(self.channelId)
+                    pbMess.message = "Oreno VOD" # TODO: Koko VOD URL ni suru
+                    pbMess.session.append(self.session)
+                    if not self.sendTotally(self.packageMessageForSending(messageLookupMessage[type(pbMess)],pbMess.SerializeToString())):
+                        self.wrapUpThread(True)
+                    return
         
         #only parse these if we are the eavesdropper
         if not self.mimic:
