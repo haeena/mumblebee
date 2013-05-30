@@ -1,5 +1,8 @@
 #!/usr/bin/env python
 #
+#Copyright (c) 2013, Toshiaki Hatano <haeena@haeena.net>
+#
+#Contain code from the eve-bot
 #Copyright (c) 2009, Philip Cass <frymaster@127001.org>
 #Copyright (c) 2009, Alan Ainsworth <fruitbat@127001.org>
 #
@@ -363,19 +366,17 @@ class mumbleConnection(threading.Thread):
                 return
         #Type 11 = TextMessage
         if msgType==11:
-            pdb.set_trace()
             message=self.parseMessage(msgType,stringMessage)
             if message.actor!=self.session:
                 # message.message = string
                 pbMess =  Mumble_pb2.TextMessage()
                 pbMess.actor = self.session
                 pbMess.channel_id.append(self.channelId)
-                pbMess.message = "asdf" # Koko VOD URL ni suru
+                pbMess.message = "asdf" # TODO: Koko VOD URL ni suru
                 pbMess.session.append(self.session)
                 if not self.sendTotally(self.packageMessageForSending(messageLookupMessage[type(pbMess)],pbMess.SerializeToString())):
                     self.wrapUpThread(True)
                 return
-            #pprint (dir(message))
         
         #only parse these if we are the eavesdropper
         if not self.mimic:
@@ -429,6 +430,7 @@ class mumbleConnection(threading.Thread):
 
 
     def run(self):
+        pdb.set_trace()
         try:
             self.socket.connect(self.host)
         except:
@@ -512,10 +514,10 @@ def main():
 
     host=(o.server,o.port)
 
-    if o.eavesdrop_in=="Root":
-        p.print_help()
-        print "\nEavesdrop channel cannot be root (or it would briefly attempt to mimic everyone who joined - including mimics)"
-        sys.exit(1)
+    #if o.eavesdrop_in=="Root":
+    #    p.print_help()
+    #    print "\nEavesdrop channel cannot be root (or it would briefly attempt to mimic everyone who joined - including mimics)"
+    #    sys.exit(1)
 
     eavesdropper = mumbleConnection(host,o.nick,o.eavesdrop_in,mimicPrefix=o.mimic_prefix,mimicChannel=o.relay_to,relayDelay=o.delay,password=o.password,verbose=o.verbose)
     pp=eavesdropper.plannedPackets
@@ -526,7 +528,7 @@ def main():
     while eavesdropper.isAlive():
         time.sleep(1)
     
-    #Edge case - if Eve is kicked and mimics are still speaking, they won't leave until they have nothing to say
+    #Edge case - if mumblebee is kicked and mimics are still speaking, they won't leave until they have nothing to say
     #In that case, the main thread will have already died
     notAllDead=True
     while notAllDead:
