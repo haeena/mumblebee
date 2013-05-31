@@ -36,9 +36,6 @@
 #  NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 #  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#
-#http://frymaster.127001.org/mumble
-
 import socket
 import time
 import struct
@@ -80,11 +77,10 @@ threadNumber=0
 for i in messageLookupMessage.keys():
         messageLookupNumber[messageLookupMessage[i]]=i
 
-
 def discontinue_processing(signl, frme):
     print time.strftime("%a, %d %b %Y %H:%M:%S +0000"), "Received shutdown notice"
     if eavesdropper:
-        eavesdropper.wrapUpThread(True)
+        eavesdropper.wrapUpThread()
     else:
         sys.exit(0)
 
@@ -154,12 +150,10 @@ class timedWatcher(threading.Thread):
                 sleeptime = altsleeptime
             if sleeptime > 0:
                 time.sleep(sleeptime)
-        print time.strftime("%a, %d %b %Y %H:%M:%S +0000"),self.threadName,"timed thread going away"
-
-                    
+        print time.strftime("%a, %d %b %Y %H:%M:%S +0000"),self.threadName,"timed thread going away"                    
 
 class mumbleConnection(threading.Thread):
-    def __init__(self,host=None,nickname=None,channel=None,mimic=False,mimicPrefix=None,mimicChannel=None,relayDelay=None,password=None,verbose=False):
+    def __init__(self,host=None,nickname=None,channel=None,delay=None,limit=None,password=None,verbose=False):
         global threadNumber
         i = threadNumber
         threadNumber+=1
@@ -173,52 +167,23 @@ class mumbleConnection(threading.Thread):
         self.host=host
         self.nickname=nickname
         self.channel=channel
-        self.mimic=mimic
         self.inChannel=False
         self.session=None
         self.channelId=None
         self.victimSession=None
         self.userList={}
-        self.mimicList={}
         self.readyToClose=False
         self.timedWatcher = None
-        self.mimicPrefix=mimicPrefix
-        self.mimicChannel=mimicChannel
-        self.relayDelay=relayDelay
+        # TODO: Implement delay and rate limit
+        self.delay=delay
+        self.limit=limit
         self.password=password
         self.verbose=verbose
-
-    def decodePDSInt(self,m,si=0):
-        v = ord(m[si])
-        if ((v & 0x80) == 0x00):
-            return ((v & 0x7F),1)
-        elif ((v & 0xC0) == 0x80):
-            return ((v & 0x4F) << 8 | ord(m[si+1]),2)
-        elif ((v & 0xF0) == 0xF0):
-            if ((v & 0xFC) == 0xF0):
-                return (ord(m[si+1]) << 24 | ord(m[si+2]) << 16 | ord(m[si+3]) << 8 | ord(m[si+4]),5)
-            elif ((v & 0xFC) == 0xF4):
-                return (ord(m[si+1]) << 56 | ord(m[si+2]) << 48 | ord(m[si+3]) << 40 | ord(m[si+4]) << 32 | ord(m[si+5]) << 24 | ord(m[si+6]) << 16 | ord(m[si+7]) << 8 | ord(m[si+8]),9)
-            elif ((v & 0xFC) == 0xF8):
-                result,length=decodePDSInt(m,si+1)
-                return(-result,length+1)
-            elif ((v & 0xFC) == 0xFC):
-                return (-(v & 0x03),1)
-            else:
-                print time.strftime("%a, %d %b %Y %H:%M:%S +0000"),"Help Help, out of cheese :("
-                sys.exit(1)
-        elif ((v & 0xF0) == 0xE0):
-            return ((v & 0x0F) << 24 | ord(m[si+1]) << 16 | ord(m[si+2]) << 8 | ord(m[si+3]),4)
-        elif ((v & 0xE0) == 0xC0):
-            return ((v & 0x1F) << 16 | ord(m[si+1]) << 8 | ord(m[si+2]),3)
-        else:
-            print time.strftime("%a, %d %b %Y %H:%M:%S +0000"),"out of cheese?"
-            sys.exit(1)
-
+    
     def packageMessageForSending(self,msgType,stringMessage):
         length=len(stringMessage)
         return struct.pack(headerFormat,msgType,length)+stringMessage
-
+    
     def sendTotally(self,message):
         self.socketLock.acquire()
         while len(message)>0:
@@ -240,109 +205,37 @@ class mumbleConnection(threading.Thread):
                 print time.strftime("%a, %d %b %Y %H:%M:%S +0000"),self.threadName,"Server socket died while trying to read, immediate abort"
                 return None
         return message
-
+    
     def parseMessage(self,msgType,stringMessage):
         msgClass=messageLookupNumber[msgType]
         message=msgClass()
         message.ParseFromString(stringMessage)
         return message
-
+    
     def joinChannel(self):
         if self.channelId!=None and self.session!=None:
             pbMess = Mumble_pb2.UserState()
             pbMess.session=self.session
             pbMess.channel_id=self.channelId
             if not self.sendTotally(self.packageMessageForSending(messageLookupMessage[type(pbMess)],pbMess.SerializeToString())):
-                self.wrapUpThread(True)
+                self.wrapUpThread()
                 return
             self.inChannel=True
-            #for person in self.userList:
-            #    self.checkMimic(person)
 
-    def checkThreads(self):
-        #Check to see if any mimics have died for any reason
-        removeList=[]
-        for session in self.mimicList:
-            mimic=self.mimicList[session]
-            if not mimic["thread"].isAlive():
-                removeList.append(session)
-        for item in removeList:
-            del self.mimicList[item]
-
-    def checkMimic(self,session):
-        if not self.mimic:                                        #If we are the eavesdropper...
-            channel=-1
-            if self.inChannel:                                    #if we are in the channel (implies we know the channel and our own ID)...
-                if not session==self.session:                            #if this isn't ourselves...
-                    victim=self.userList[session]
-                    if "channel" in victim:                            #if we know this user's channel...
-                        if self.channelId==victim["channel"]:                #and if it's the _right_ channel, then:
-                            if not session in self.mimicList:            #If no mimic for this user already...
-                                self.addMimic(session)                #add one...
-                            else:
-                                self.mimicList[session]["setClose"](False)    #else confirm to the mimic that it should stay alive.
-                        elif session in self.mimicList:                    #On the other hand, if it's the wrong channel and a mimic exists,
-                            self.mimicList[session]["setClose"](True)        #Tell the mimic to shut down when it has nothing left to say
-
-    def setClose(self,bull):
-        self.readyToClose=bull
-    
-    def getClose(self):
-        return self.readyToClose
-
-    def addMimic(self,session):
-        #check if the session we want to mimic is itself a mimic (if we allow mimics on a different server, this check should be bypassed)
-        for item in self.mimicList:
-            mimic=self.mimicList[item]
-            if mimic["thread"].session==session: return
-        victim=self.userList[session]
-        #Find the name of the victim (or fake it)
-        if "name" in victim:
-            victimNick=victim["name"]
-        else:
-            victimNick=str(session)
-        #Choose a mimic name
-        mimicNick=self.mimicPrefix+victimNick
-        unique=False
-        i=0
-        while not unique:
-            unique=True
-            for person in self.userList:
-                person=self.userList[person]
-                if "name" in person:
-                    if person["name"]==mimicNick:
-                        unique=False
-                        mimicNick=self.mimicPrefix+victimNick+str(i)
-            i=i+1
-        #Create mimic object and timed message queue etc.
-        mimic = mumbleConnection(self.host,mimicNick,self.mimicChannel,mimic=True,password=self.password,verbose=self.verbose)
-        pp=mimic.plannedPackets
-        self.mimicList[session]={"plannedPackets":pp}
-        self.mimicList[session]["setClose"]=mimic.setClose
-        self.mimicList[session]["thread"]=mimic
-        self.mimicList[session]["getClose"]=mimic.getClose
-        print time.strftime("%a, %d %b %Y %H:%M:%S +0000"),self.threadName,"started mimic",mimicNick,"thread",mimic.threadName
-        mimic.start()
-
-    def wrapUpThread(self,killChildrenImmediately=False):
+    def wrapUpThread(self):
         #called after thread is confirmed to be needing to die because of kick / socket close
         self.readyToClose=True
         self.plannedPackets=collections.deque()
-        for item in self.mimicList:
-            self.mimicList[item]["setClose"](True)
-            if killChildrenImmediately:
-                self.mimicList[item]["thread"].wrapUpThread(True)
     
     def readPacket(self):
-        self.checkThreads()
         meta=self.readTotally(6)
         if not meta:
-            self.wrapUpThread(True)
+            self.wrapUpThread()
             return
         msgType,length=struct.unpack(headerFormat,meta)
         stringMessage=self.readTotally(length)
         if not stringMessage:
-            self.wrapUpThread(True)
+            self.wrapUpThread()
             return
         
         #Type 5 = ServerSync
@@ -357,13 +250,35 @@ class mumbleConnection(threading.Thread):
                 self.channelId=message.channel_id
                 self.joinChannel()
         #Type 8 = UserRemove (kick)
-        if msgType==8 and self.session!=None:
+        if msgType==8:
             message=self.parseMessage(msgType,stringMessage)
-            if message.session==self.session:
-                print time.strftime("%a, %d %b %Y %H:%M:%S +0000"),self.threadName,"********* KICKED ***********"
-                #Should mimics leave immediately if Eve is kicked?  A matter of opinion... currently they only do so upon signal or fatal error
-                self.wrapUpThread(False)
-                return
+            if self.session!=None:
+                if message.session==self.session:
+                    print time.strftime("%a, %d %b %Y %H:%M:%S +0000"),self.threadName,"********* KICKED ***********"
+                    self.wrapUpThread()
+                    return
+            session=message.session
+            if session in self.userList:
+                del self.userList[session]
+        #Type 9 = UserState
+        if msgType==9:
+            message=self.parseMessage(msgType,stringMessage)
+            session=message.session
+            if session in self.userList:
+                record=self.userList[session]
+            else:
+                record={"session":session}
+                self.userList[session]=record
+            name=None
+            channel=None
+            if message.HasField("name"):
+                name=message.name
+                record["name"]=name
+            if message.HasField("channel_id"):
+                channel=message.channel_id
+                record["channel"]=channel
+            if name and not channel:
+                record["channel"]=0
         #Type 11 = TextMessage
         if msgType==11:
             message=self.parseMessage(msgType,stringMessage)
@@ -375,60 +290,9 @@ class mumbleConnection(threading.Thread):
                     pbMess.message = "Oreno VOD" # TODO: Koko VOD URL ni suru
                     pbMess.session.append(self.session)
                     if not self.sendTotally(self.packageMessageForSending(messageLookupMessage[type(pbMess)],pbMess.SerializeToString())):
-                        self.wrapUpThread(True)
+                        self.wrapUpThread()
                     return
-        
-        #only parse these if we are the eavesdropper
-        if not self.mimic:
-            #Type 8 = UserRemove (kick)
-            if msgType==8:
-                message=self.parseMessage(msgType,stringMessage)
-                session=message.session
-                #if session in self.mimicList:
-                #    self.mimicList[session]["setClose"](True)
-                #    del self.mimicList[session]
-                if session in self.userList:
-                    del self.userList[session]
-            #Type 9 = UserState
-            if msgType==9:
-                message=self.parseMessage(msgType,stringMessage)
-                session=message.session
-                if session in self.userList:
-                    record=self.userList[session]
-                else:
-                    record={"session":session}
-                    self.userList[session]=record
-                name=None
-                channel=None
-                if message.HasField("name"):
-                    name=message.name
-                    record["name"]=name
-                if message.HasField("channel_id"):
-                    channel=message.channel_id
-                    record["channel"]=channel
-                if name and not channel:
-                    record["channel"]=0
-                #self.checkMimic(session)
-        if True:
-            return
-            #Type 1 = UDPTUnnel (voice data, not a real protobuffers message)                    
-            if msgType==1:
-                session,sessLen=self.decodePDSInt(stringMessage,1)
-                if session in self.mimicList:
-                    if not self.mimicList[session]["getClose"]():
-                        voicePacket=self.packageMessageForSending(1,stringMessage[0]+stringMessage[1+sessLen:])
-                        event = (time.time()+self.relayDelay,voicePacket)
-                        pp = self.mimicList[session]["plannedPackets"]
-                        pp.append(event)
-        #Type 1 = UDPTUnnel (voice data, not a real protobuffers message)
-        if msgType!=1 and self.verbose:
-            try:
-              message=self.parseMessage(msgType,stringMessage)
-              print str(type(message)),message
-            except KeyError:
-              print "Ignoring unknown message of type " + str(msgType)
-
-
+    
     def run(self):
         pdb.set_trace()
         try:
@@ -443,26 +307,26 @@ class mumbleConnection(threading.Thread):
         pbMess.version=66048
         pbMess.os=platform.system()
         pbMess.os_version="mumblebee0.0.1"
-
+        
         initialConnect=self.packageMessageForSending(messageLookupMessage[type(pbMess)],pbMess.SerializeToString())
-
+        
         pbMess = Mumble_pb2.Authenticate()
         pbMess.username=self.nickname
         if self.password!=None:
             pbMess.password=self.password
         celtversion=pbMess.celt_versions.append(-2147483637)
-
+        
         initialConnect+=self.packageMessageForSending(messageLookupMessage[type(pbMess)],pbMess.SerializeToString())
-
+        
         if not self.sendTotally(initialConnect):
             return
-
+        
         sockFD=self.socket.fileno()
-
+        
         self.timedWatcher = timedWatcher(self.plannedPackets,self.socketLock,self.socket)
         self.timedWatcher.start()
         print time.strftime("%a, %d %b %Y %H:%M:%S +0000"),self.threadName,"started timed watcher",self.timedWatcher.threadName
-
+        
         while True:
             pollList,foo,errList=select.select([sockFD],[],[sockFD])
             for item in pollList:
@@ -470,12 +334,12 @@ class mumbleConnection(threading.Thread):
                     self.readPacket()
             if self.readyToClose:
                 if len(self.plannedPackets)==0:
-                    self.wrapUpThread(False)
+                    self.wrapUpThread()
                     break
         
         if self.timedWatcher:
             self.timedWatcher.stopRunning()
-
+        
         self.socket.close()
         print time.strftime("%a, %d %b %Y %H:%M:%S +0000"),self.threadName,"waiting for timed watcher to die..."
         if self.timedWatcher!=None:
@@ -486,18 +350,17 @@ class mumbleConnection(threading.Thread):
 def main():
     global eavesdropper,warning
             
-    p = optparse.OptionParser(description='Mumble 1.2 relaybot to relay comms from a match channel to a spectator channel, with a time delay e.g. if watching on a delayed SourceTV server. Full documentation is available at http://frymaster.127001.org/mumble',
-                prog='eve-bot.py',
-                version='%prog 1.1',
-                usage='\t%prog -e \"Match Channel\" -r \"Spectator Channel\"')
-
+    p = optparse.OptionParser(description='Mumble 1.2 chatbot',
+                prog='mumblebee.py',
+                version='%prog 0.0.1',
+                usage='\t%prog -e \"Channel to listen to\"')
+    
     p.add_option("-e","--eavesdrop-in",help="Channel to eavesdrop in (MANDATORY)",action="store",type="string")
-    p.add_option("-r","--relay-to",help="Channel to relay speech to (MANDATORY)",action="store",type="string")
     p.add_option("-s","--server",help="Host to connect to (default %default)",action="store",type="string",default="localhost")
     p.add_option("-p","--port",help="Port to connect to (default %default)",action="store",type="int",default=64738)
     p.add_option("-n","--nick",help="Nickname for the eavesdropper (default %default)",action="store",type="string",default="mumblebee")
-    p.add_option("-d","--delay",help="Time to delay speech by in seconds (default %default)",action="store",type="float",default=90)
-    p.add_option("-m","--mimic-prefix",help="Prefix for mimic-bots (default %default)",action="store",type="string",default="Mimic-")
+    p.add_option("-d","--delay",help="Time to delay response by in seconds (default %default)",action="store",type="float",default=0)
+    p.add_option("-l","--limit",help="Maximum response per minutes (default %default, 0 = unlimited)",action="store",type="int",default=0)
     p.add_option("-v","--verbose",help="Outputs and translates all messages received from the server",action="store_true",default=False)
     p.add_option("--password",help="Password for server, if any",action="store",type="string")
     
@@ -506,20 +369,20 @@ def main():
     o, arguments = p.parse_args()
     if len(warning)>0:
         sys.exit(1)
-
-    if o.relay_to==None or o.eavesdrop_in==None:
+    
+    if o.eavesdrop_in==None:
         p.print_help()
-        print "\nYou MUST include both an eavesdrop channel to listen to, and a relay channel to relay to"
+        print "\nYou MUST include an eavesdrop channel to listen to"
         sys.exit(1)
-
+    
     host=(o.server,o.port)
-
+    
     #if o.eavesdrop_in=="Root":
     #    p.print_help()
     #    print "\nEavesdrop channel cannot be root (or it would briefly attempt to mimic everyone who joined - including mimics)"
     #    sys.exit(1)
-
-    eavesdropper = mumbleConnection(host,o.nick,o.eavesdrop_in,mimicPrefix=o.mimic_prefix,mimicChannel=o.relay_to,relayDelay=o.delay,password=o.password,verbose=o.verbose)
+    
+    eavesdropper = mumbleConnection(host,o.nick,o.eavesdrop_in,delay=o.delay,limit=o.limit,password=o.password,verbose=o.verbose)
     pp=eavesdropper.plannedPackets
     eavesdropper.start()
     
@@ -527,16 +390,6 @@ def main():
     
     while eavesdropper.isAlive():
         time.sleep(1)
-    
-    #Edge case - if mumblebee is kicked and mimics are still speaking, they won't leave until they have nothing to say
-    #In that case, the main thread will have already died
-    notAllDead=True
-    while notAllDead:
-        notAllDead=False
-        for session in eavesdropper.mimicList:
-            if eavesdropper.mimicList[session]["thread"].isAlive():
-                notAllDead=True
-        time.sleep(0.1)
 
 if __name__ == '__main__':
         main()
