@@ -41,13 +41,14 @@ import time
 import struct
 import sys
 import select
-import collections
 import thread
 import threading
 import signal
 import os
 import optparse
 import platform
+import random
+import ConfigParser
 
 import pdb
 from pprint import pprint
@@ -89,10 +90,9 @@ signal.signal( signal.SIGINT, discontinue_processing )
 signal.signal( signal.SIGTERM, discontinue_processing )
 
 class timedWatcher(threading.Thread):
-    def __init__(self, plannedPackets,socketLock,socket):
+    def __init__(self,socketLock,socket):
         global threadNumber
         threading.Thread.__init__(self)
-        self.plannedPackets=plannedPackets
         self.pingTotal=1
         self.isRunning=True
         self.socketLock=socketLock
@@ -130,24 +130,7 @@ class timedWatcher(threading.Thread):
                     packet = packet[sent:]
                 self.socketLock.release()
                 self.nextPing=t+5
-            if len(self.plannedPackets) > 0:
-                if t > self.plannedPackets[0][0]:
-                    self.socketLock.acquire()
-                    while t > self.plannedPackets[0][0]:
-                        event = self.plannedPackets.popleft()
-                        packet = event[1]
-                        while len(packet)>0:
-                            sent=self.socket.send(packet)
-                            packet = packet[sent:]
-                        if len(self.plannedPackets)==0:
-                            break
-                    self.socketLock.release()
-            sleeptime = 10
-            if len(self.plannedPackets) > 0:
-                sleeptime = self.plannedPackets[0][0]-t
-            altsleeptime=self.nextPing-t
-            if altsleeptime < sleeptime:
-                sleeptime = altsleeptime
+            sleeptime=self.nextPing-t
             if sleeptime > 0:
                 time.sleep(sleeptime)
         print time.strftime("%a, %d %b %Y %H:%M:%S +0000"),self.threadName,"timed thread going away"                    
@@ -159,7 +142,6 @@ class mumbleConnection(threading.Thread):
         threadNumber+=1
         self.threadName="Thread " + str(i)
         threading.Thread.__init__(self)
-        self.plannedPackets=collections.deque()
         tcpSock=socket.socket(type=socket.SOCK_STREAM)
         self.socketLock=thread.allocate_lock()
         self.socket=ssl.wrap_socket(tcpSock,ssl_version=ssl.PROTOCOL_TLSv1)
@@ -170,7 +152,6 @@ class mumbleConnection(threading.Thread):
         self.inChannel=False
         self.session=None
         self.channelId=None
-        self.victimSession=None
         self.userList={}
         self.readyToClose=False
         self.timedWatcher = None
@@ -225,9 +206,9 @@ class mumbleConnection(threading.Thread):
     def wrapUpThread(self):
         #called after thread is confirmed to be needing to die because of kick / socket close
         self.readyToClose=True
-        self.plannedPackets=collections.deque()
     
     def readPacket(self):
+        #pdb.set_trace()
         meta=self.readTotally(6)
         if not meta:
             self.wrapUpThread()
@@ -246,6 +227,10 @@ class mumbleConnection(threading.Thread):
         #Type 7 = ChannelState
         if (not self.inChannel) and msgType==7 and self.channelId==None:
             message=self.parseMessage(msgType,stringMessage)
+            if self.channel==None and message.channel_id==0:
+                self.channel=message.name
+                self.channelId=message.channel_id
+                self.joinChannel()
             if message.name==self.channel:
                 self.channelId=message.channel_id
                 self.joinChannel()
@@ -283,10 +268,21 @@ class mumbleConnection(threading.Thread):
         if msgType==11:
             message=self.parseMessage(msgType,stringMessage)
             if message.actor!=self.session:
+                if message.message.startswith("/roll"):
+                    pbMess =  Mumble_pb2.TextMessage()
+                    pbMess.actor = self.session
+                    pbMess.channel_id.append(self.channelId)
+                    pbMess.channel_id.append(self.userList[message.actor]["channel"])
+                    pbMess.message = self.userList[message.actor]["name"] + " rolled " + str(random.randint(0,100))
+                    pbMess.session.append(self.session)
+                    if not self.sendTotally(self.packageMessageForSending(messageLookupMessage[type(pbMess)],pbMess.SerializeToString())):
+                        self.wrapUpThread()
+                    return
                 if message.message.startswith("/vod"):
                     pbMess =  Mumble_pb2.TextMessage()
                     pbMess.actor = self.session
                     pbMess.channel_id.append(self.channelId)
+                    pbMess.channel_id.append(self.userList[message.actor]["channel"])
                     pbMess.message = "Oreno VOD" # TODO: Koko VOD URL ni suru
                     pbMess.session.append(self.session)
                     if not self.sendTotally(self.packageMessageForSending(messageLookupMessage[type(pbMess)],pbMess.SerializeToString())):
@@ -294,7 +290,6 @@ class mumbleConnection(threading.Thread):
                     return
     
     def run(self):
-        pdb.set_trace()
         try:
             self.socket.connect(self.host)
         except:
@@ -323,19 +318,18 @@ class mumbleConnection(threading.Thread):
         
         sockFD=self.socket.fileno()
         
-        self.timedWatcher = timedWatcher(self.plannedPackets,self.socketLock,self.socket)
+        self.timedWatcher = timedWatcher(self.socketLock,self.socket)
         self.timedWatcher.start()
         print time.strftime("%a, %d %b %Y %H:%M:%S +0000"),self.threadName,"started timed watcher",self.timedWatcher.threadName
         
         while True:
-            pollList,foo,errList=select.select([sockFD],[],[sockFD])
+            pollList,foo,errList=select.select([sockFD],[],[sockFD],5)
             for item in pollList:
                 if item==sockFD:
                     self.readPacket()
             if self.readyToClose:
-                if len(self.plannedPackets)==0:
-                    self.wrapUpThread()
-                    break
+                self.wrapUpThread()
+                break
         
         if self.timedWatcher:
             self.timedWatcher.stopRunning()
@@ -353,14 +347,15 @@ def main():
     p = optparse.OptionParser(description='Mumble 1.2 chatbot',
                 prog='mumblebee.py',
                 version='%prog 0.0.1',
-                usage='\t%prog -e \"Channel to listen to\"')
+                usage='\t%prog')
     
-    p.add_option("-e","--eavesdrop-in",help="Channel to eavesdrop in (MANDATORY)",action="store",type="string")
+    p.add_option("-e","--eavesdrop-in",help="Channel to eavesdrop in (default %%Root)",action="store",type="string",default=None)
     p.add_option("-s","--server",help="Host to connect to (default %default)",action="store",type="string",default="localhost")
     p.add_option("-p","--port",help="Port to connect to (default %default)",action="store",type="int",default=64738)
     p.add_option("-n","--nick",help="Nickname for the eavesdropper (default %default)",action="store",type="string",default="mumblebee")
     p.add_option("-d","--delay",help="Time to delay response by in seconds (default %default)",action="store",type="float",default=0)
     p.add_option("-l","--limit",help="Maximum response per minutes (default %default, 0 = unlimited)",action="store",type="int",default=0)
+    p.add_option("-c","--config",help="Configuration file",action="store",type="string",default="mumblebee.cfg")
     p.add_option("-v","--verbose",help="Outputs and translates all messages received from the server",action="store_true",default=False)
     p.add_option("--password",help="Password for server, if any",action="store",type="string")
     
@@ -370,20 +365,9 @@ def main():
     if len(warning)>0:
         sys.exit(1)
     
-    if o.eavesdrop_in==None:
-        p.print_help()
-        print "\nYou MUST include an eavesdrop channel to listen to"
-        sys.exit(1)
-    
     host=(o.server,o.port)
     
-    #if o.eavesdrop_in=="Root":
-    #    p.print_help()
-    #    print "\nEavesdrop channel cannot be root (or it would briefly attempt to mimic everyone who joined - including mimics)"
-    #    sys.exit(1)
-    
     eavesdropper = mumbleConnection(host,o.nick,o.eavesdrop_in,delay=o.delay,limit=o.limit,password=o.password,verbose=o.verbose)
-    pp=eavesdropper.plannedPackets
     eavesdropper.start()
     
     #Need to keep main thread alive to receive shutdown signal
